@@ -1,163 +1,89 @@
-const url = "wss://stream.data.alpaca.markets/v1beta1/crypto";
-const socket = new WebSocket(url);
+var config = require('./config');
+var ccxt = require('ccxt');
 
-const API_KEY = config.API_KEY;
-const SECRET_KEY = config.SECRET_KEY;
+(async function () {
+    var exchange = new ccxt.ftxus({
+        'apiKey': config.API_KEY,
+        'secret': config.SECRET_KEY
+    });
+    var ticker = await exchange.fetchTicker(config.SYMBOL);
 
-const auth = {"action": "auth", "key": API_KEY, "secret": SECRET_KEY};
-const subscribe = {"action":"subscribe", "trades":["ETHUSD"], "quotes":["ETHUSD"], "bars":["ETHUSD"]}
+    var buyOrders = [];
+    var sellOrders = [];
 
-const quotesElement = document.getElementById('quotes');
-const tradesElement = document.getElementById('trades');
+    //var initialBuyOrder = exchange.createMarketBuyOrder(config.SYMBOL, config.POSITION_SIZE * config.NUM_SELL_GRID_LINES);
 
-let currentBar = {};
-let trades = [];
-
-var chart = LightweightCharts.createChart(document.getElementById('chart'), {
-	width: 700,
-    height: 700,
-	layout: {
-		backgroundColor: '#000000',
-		textColor: '#ffffff',
-	},
-	grid: {
-		vertLines: {
-			color: '#404040',
-		},
-		horzLines: {
-			color: '#404040',
-		},
-	},
-	crosshair: {
-		mode: LightweightCharts.CrosshairMode.Normal,
-	},
-	priceScale: {
-		borderColor: '#cccccc',
-	},
-	timeScale: {
-		borderColor: '#cccccc',
-		timeVisible: true,
-	},
-});
-
-var candleSeries = chart.addCandlestickSeries();
-
-var start = new Date(Date.now() - (7200 * 1000)).toISOString();
-
-console.log(start);
-
-var bars_url = 'https://data.alpaca.markets/v1beta1/crypto/ETHUSD/bars?exchanges=CBSE&timeframe=1Min&start=' + start;
-
-fetch(bars_url, {
-    headers: {
-        'APCA-API-KEY-ID': API_KEY,
-        'APCA-API-SECRET-KEY': SECRET_KEY
+    for (var i = 1; i <= config.NUM_BUY_GRID_LINES; ++i) {
+        var price = ticker['bid'] - (config.GRID_SIZE * i);
+        console.log(`submitting market limit buy order at ${price}`);
+        var order = await exchange.createLimitBuyOrder(config.SYMBOL, config.POSITION_SIZE, price);
+        buyOrders.push(order['info']);
     }
-}).then((r) => r.json())
-    .then((response) => {
-        console.log(response);
+
+    for (var i = 1; i <= config.NUM_SELL_GRID_LINES; ++i) {
+        var price = ticker['bid'] + (config.GRID_SIZE * i);
+        console.log(`submitting market limit sell order at ${price}`);
+        var order = await exchange.createLimitSellOrder(config.SYMBOL, config.POSITION_SIZE, price);
+        sellOrders.push(order['info']);
+    }
+
+    while (true) {
+        var closedOrderIds = [];
         
-        const data = response.bars.map(bar => (
-            {
-                open: bar.o,
-                high: bar.h,
-                low: bar.l,
-                close: bar.c,
-                time: Date.parse(bar.t) / 1000
+        for (var buyOrder of buyOrders) {
+            console.log(`checking buy order ${buyOrder['id']}`);
+            
+            try {
+                order = await exchange.fetchOrder(buyOrder['id']);
+            } catch (error) {
+                console.log("request failed: ", error);
             }
-        ));
-
-        currentBar = data[data.length-1];
-
-        console.log(data);
-
-        candleSeries.setData(data);
-
-    })
-
-
-socket.onmessage = function(event) {
-    const data = JSON.parse(event.data);
-    const message = data[0]['msg'];
-
-    if (message == 'connected') {
-        console.log('do authentication');
-        socket.send(JSON.stringify(auth));
-    }
-
-    if (message == 'authenticated') {
-        socket.send(JSON.stringify(subscribe));
-    }
-
-    for (var key in data) {
-
-        const type = data[key].T;
-
-        if (type == 'q') {
-            //console.log('got a quote');
-            //console.log(data[key]);
-
-            const quoteElement = document.createElement('div');
-            quoteElement.className = 'quote';
-            quoteElement.innerHTML = `<b>${data[key].t}</b> ${data[key].bp} ${data[key].ap}`;
-            quotesElement.appendChild(quoteElement);
-
-            var elements = document.getElementsByClassName('quote');
-            if (elements.length > 10) {
-                quotesElement.removeChild(elements[0]);
+                
+            var orderInfo = order['info'];
+    
+            if (orderInfo['status'] == config.CLOSED_ORDER_STATUS) {
+                closedOrderIds.push(orderInfo['id']);
+                console.log(`buy order executed at ${orderInfo['price']}`);
+                var newSellPrice = parseFloat(orderInfo['price']) + config.GRID_SIZE;
+                console.log(`creating new limit sell order at ${newSellPrice}`);
+                var newSellOrder = await exchange.createLimitSellOrder(config.SYMBOL, config.POSITION_SIZE, newSellPrice);
+                sellOrders.push(newSellOrder);
             }
+                
+            await new Promise(resolve => setTimeout(resolve, config.CHECK_ORDERS_FREQUENCY));
         }
 
-        if (type == 't') {
-            //console.log('got a trade');
-            //console.log(data[key]);
+        for (var sellOrder of sellOrders) {
+            console.log(`checking sell order ${sellOrder['id']}`);
             
-            const tradeElement = document.createElement('div');
-            tradeElement.className = 'trade';
-            tradeElement.innerHTML = `<b>${data[key].t}</b> ${data[key].p} ${data[key].s}`;
-            tradesElement.appendChild(tradeElement);
-
-            var elements = document.getElementsByClassName('trade');
-            if (elements.length > 10) {
-                tradesElement.removeChild(elements[0]);
+            try {
+                order = await exchange.fetchOrder(sellOrder['id']);
+            } catch (error) {
+                console.log("request failed: ", error);
             }
-
-            trades.push(data[key].p);
-            
-            var open = trades[0];
-            var high = Math.max(...trades);
-            var low = Math.min(...trades);
-            var close = trades[trades.length - 1];
-
-            console.log(open, high, low, close);
-
-            candleSeries.update({
-                time: currentBar.time + 60,
-                open: open,
-                high: high,
-                low: low,
-                close: close
-            })
+                
+            var orderInfo = order['info'];
+    
+            if (orderInfo['status'] == config.CLOSED_ORDER_STATUS) {
+                closedOrderIds.push(orderInfo['id']);
+                console.log(`sell order executed at ${orderInfo['price']}`);
+                var newBuyPrice = parseFloat(orderInfo['price']) - config.GRID_SIZE;
+                console.log(`creating new limit buy order at ${newBuyPrice}`);
+                var newBuyOrder = await exchange.createLimitBuyOrder(config.SYMBOL, config.POSITION_SIZE, newBuyPrice);
+                buyOrders.push(newBuyOrder);
+            }
+                
+            await new Promise(resolve => setTimeout(resolve, config.CHECK_ORDERS_FREQUENCY));
         }
 
-        if (type == 'b' && data[key].x == 'CBSE') {
-            console.log('got a new bar');
-            console.log(data[key]);
+        closedOrderIds.forEach(closedOrderId => {
+            buyOrders = buyOrders.filter(buyOrder => buyOrder['id'] != closedOrderId);
+            sellOrders = sellOrders.filter(sellOrder => sellOrder['id'] != closedOrderId);
+        });
 
-            var bar = data[key];
-            var timestamp = new Date(bar.t).getTime() / 1000;
-
-            currentBar = {
-                time: timestamp,
-                open: bar.o,
-                high: bar.h,
-                low: bar.l,
-                close: bar.c
-            }
-
-            candleSeries.update(currentBar);
-            
-            trades = [];
+        if (sellOrders.length == 0) {
+            console.log("nothing left to sell, exiting");
+            process.exit(1);
         }
     }
-}
+})();
