@@ -1,0 +1,3 @@
+ccxt
+websocket-server
+websocket-client
